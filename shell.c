@@ -1,16 +1,16 @@
 // *******************************************************
-// Version ..... : V0.0 du 27/05/2024
+// Version ..... : V1.0 du 27/05/2024
 // 
 // Fonctionnalités :
 // 		- les pipes
 //
-// Juste sorti le dirs pour en faire une variable globale. 
 // ********************************************************/
 
 # include "sys.h"
 #include <string.h>
 
 int decouper(char *, char *, char *[], int);
+int exec_pipeline(char *);
 int lance_cmd(char *[]);
 int traite_pipe(int, char *);
 
@@ -22,49 +22,52 @@ enum {
 	MaxPipes = 128,				// nbre max de commandes séparées par " | " sur une ligne
 };
 
-# define PROMPT "! "
-
-char * dirs[MaxDirs];			// liste des répertoires de PATH (globale ???)
+# define PROMPT "V1.0 "
+char * path[MaxDirs];			// liste des répertoires de PATH (globale ???)
 
 int main(int argc, char * argv[]){
+	
 	char ligne[MaxLigne];			// la dernière ligne entrée par l'utilisateur
-	char * mot[MaxMot];				// liste des mots de la ligne saisie
-	// char * dirs[MaxDirs];			// liste des répertoires de PATH
-	char * liste_cmd[MaxPipes];		// la ou les (en cas de pipe(s)) commande(s) de la ligne
-	int tmp, i, erreur ;
-	int in = 0;						// entrée à utiliser pour le prochain processus
 
 	/* Decouper UNE COPIE de PATH en repertoires */
-	decouper(strdup(getenv("PATH")), ":", dirs, MaxDirs);
+	decouper(strdup(getenv("PATH")), ":", path, MaxDirs);
 
 	/* Lire et traiter chaque ligne de commande */
 	for (printf(PROMPT); fgets(ligne, sizeof ligne, stdin) != 0; printf(PROMPT))
-	{
-		/* Séparer les différentes commandes en cas de pipe */
-		decouper(ligne, "|\n", liste_cmd, MaxPipes);	
-		if (liste_cmd[0] == 0) continue;				// ligne vide
+		exec_pipeline(ligne);
+
+	printf("Bye\n");
+	return 0;
+}
+
+/* Exécute une pipeline (une série de commandes séparées par des | */
+int exec_pipeline(char * pipeline){
+	char * mot[MaxMot];				// liste des mots de la ligne saisie
+	char * liste_cmd[MaxPipes];		// la ou les (en cas de pipe(s)) commande(s) de la ligne
+	int tmp, i;
+	int in = 0;						// entrée à utiliser pour le prochain processus
+
+	/* Séparer les différentes commandes en cas de pipe */
+		decouper(pipeline, "|\n", liste_cmd, MaxPipes);	
+		if (liste_cmd[0] == 0) return 0;				// ligne vide
 
 		/* Traiter chaque commande de la ligne, sauf la dernière */
-		for (i = 0; liste_cmd[i+1] != 0; i++)
-		{	
+		for (i = 0; liste_cmd[i+1] != 0; i++) {	
 			/* Exécuter une commande et récupérer le fichier qui servira d'entrée pour la suivante */
-			in = traite_pipe(in, liste_cmd[i]);
-			if ((erreur = (in < 0))) {
+			if ((in = traite_pipe(in, liste_cmd[i])) < 0) {
 				fprintf(stderr, "Problème dans l'exécution de la commande : %s.\n", liste_cmd[i]);
-				break; }
+				return -1; }
 		}
-
-		if (erreur) continue;	// il y a eu un problème dans les commandes précédentes
 
 		/* lancement du processus final de la ligne de commande */
 		if ((tmp = fork()) < 0){
 			perror("fork");
-			continue;}
+			return -1;}
 
 		// parent : attendre la fin de l'enfant
 		if (tmp != 0){
 			while(wait(0) != tmp);
-			continue;}
+			return 0;}
 
 		// enfant : exec du programme
 		if(in != 0) {
@@ -73,9 +76,7 @@ int main(int argc, char * argv[]){
 		
 		decouper(liste_cmd[i], " \t\n", mot, MaxMot);
 		lance_cmd(mot);	// exécute la dernière commande de la ligne
-	}
-	printf("Bye\n");
-	return 0;
+		return 0;
 }
 
 /* 	Lance un processus enfant qui lit depuis l'entrée spécifiée (in) et écrit dans un pipe
@@ -86,7 +87,7 @@ int traite_pipe(int in, char * commande){
 	char * mot[MaxMot];
 
 	if (decouper(commande, " \t\n", mot, MaxMot) == 0)	// commande vide
-	// if (strcmp(commande, " \0"))		// JSP pourquoi j'avais laissé cette ligne et commenté la précédente et du coup ça marchait paaaaaas
+	// if (strcmp(commande, " \0"))
 		return -1;
 
 	/* ouvrir un pipe pour communiquer avec le processus (frère) suivant */	
@@ -119,8 +120,8 @@ int traite_pipe(int in, char * commande){
 int lance_cmd(char * mot[])
 {	char pathname[MaxPathLength];
 	
-	for (int i = 0; dirs[i] != 0; i ++){
-		snprintf(pathname, sizeof pathname, "%s/%s", dirs[i], mot[0]);
+	for (int i = 0; path[i] != 0; i ++){
+		snprintf(pathname, sizeof pathname, "%s/%s", path[i], mot[0]);
 		execv(pathname, mot);
 	}
 	fprintf(stderr, "%s: not found\n", mot[0]);
