@@ -1,9 +1,10 @@
 // *******************************************************
-// Version ..... : V2.0 du 30/05/2024
+// Version ..... : V3.0 du 30/05/2024
 // 
 // Fonctionnalités :
 // 		- les pipes
 //   	- les processus en arrière-plan
+// 		- les commandes internes
 //
 // ********************************************************/
 
@@ -17,6 +18,10 @@ int lance_cmd(char *);
 int traite_pipe(char * []);
 int est_vide(char *);
 int arriere_plan(char *);
+int check_interne(char *);
+int cmd_internes(char * []);
+int moncd(char *[]);
+
 
 enum {
 	MaxLigne = 1024, 			// longueur max d'une ligne de commandes
@@ -26,7 +31,7 @@ enum {
 	MaxPipes = 128,				// nbre max de commandes séparées par " | " sur une ligne
 };
 
-# define PROMPT "V2.0 "
+# define PROMPT "V3.0 "
 char * path[MaxDirs];			// liste des répertoires de PATH (globale ???)
 
 int main(int argc, char * argv[]){
@@ -42,6 +47,10 @@ int main(int argc, char * argv[]){
 
 		if (!est_vide(ligne)){
 			int bg = arriere_plan(ligne);
+
+			/* si premier plan, vérifier si c'est une commande interne avant de fork */
+			if (!bg && (check_interne(ligne)==0))
+					continue;
 
 			/* lancement du processus fils qui va exécuter la pipeline */
 			if ((tmp = fork()) < 0){
@@ -124,7 +133,7 @@ int traite_pipe(char * commandes[]){
 	dup2(in, 0);		// récupère en entrée la sortie du dernier pipe
 	close(in); 
 	return i;
-	}
+}
 
 /* exécute une commande, en cherchant l'exécutable dans la liste de répertoires fournie */
 int lance_cmd(char * commande){	
@@ -134,6 +143,8 @@ int lance_cmd(char * commande){
 	if (decouper(commande, " \t\n", mot, MaxMot) == 0){
 		fprintf(stderr, "Erreur de syntaxe (manque la dernière commande)\n");
 		exit(-1);}
+
+	if (cmd_internes(mot) == 0) exit(0);
 
 	for (int i = 0; path[i] != 0; i ++){
 		snprintf(pathname, sizeof pathname, "%s/%s", path[i], mot[0]);
@@ -168,7 +179,52 @@ int est_vide(char *str) {
     return 1;
 }
 
+/* Renvoie */
 int arriere_plan(char * ligne){
 	strtok(ligne, "&");
 	return(strtok(NULL, "") != NULL);
+}
+
+/* change de répertoire courant */
+int moncd(char * commande[]){
+	char * dir;
+	int len;
+
+	for (len = 0; commande[len] != 0; len ++);	// nombre de mots
+
+	if (len < 2){
+		dir = getenv("HOME");
+		if (dir == 0) dir = "/tmp";}
+	else if (len > 2){
+		fprintf(stderr, "usage: %s [dir]\n", commande[0]);
+		return 1;}
+	else 
+		dir = commande[1];
+	
+	if (chdir(dir) < 0){
+		perror(dir);
+		return 1;}
+	return 0;
+}
+
+/* Renvoie 0 si une commande interne a été trouvée et exécutée */
+int check_interne(char * commande){
+	/* s'il y a des pipes, ne pas exécuter la commande depuis le shell (on va fork d'abord) */
+	if (strchr(commande, '|') != NULL)
+		return 1;
+	char * mot[MaxMot];				// liste des mots de la commande à exécuter
+	decouper(commande, " \t\n", mot, MaxMot);
+	return cmd_internes(mot);
+}
+
+/* si l'entrée correspond à  une commande interne, l'exécuter et renvoyer 0, sinon 1 */
+int cmd_internes(char * commande[]){	
+	if (strcmp("moncd", commande[0]) == 0){
+		moncd(commande);
+		return 0;
+	}
+	// commande de sortie du shell
+	else if (strcmp("monexit", commande[0]) == 0)
+		exit(0);
+	return 1;
 }
