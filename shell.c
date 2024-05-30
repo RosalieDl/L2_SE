@@ -1,8 +1,9 @@
 // *******************************************************
-// Version ..... : V1.1 du 30/05/2024
+// Version ..... : V2.0 du 30/05/2024
 // 
 // Fonctionnalités :
 // 		- les pipes
+//   	- les processus en arrière-plan
 //
 // ********************************************************/
 
@@ -15,6 +16,7 @@ int exec_pipeline(char *);
 int lance_cmd(char *);
 int traite_pipe(char * []);
 int est_vide(char *);
+int arriere_plan(char *);
 
 enum {
 	MaxLigne = 1024, 			// longueur max d'une ligne de commandes
@@ -24,37 +26,41 @@ enum {
 	MaxPipes = 128,				// nbre max de commandes séparées par " | " sur une ligne
 };
 
-# define PROMPT "V1.1 "
+# define PROMPT "V2.0 "
 char * path[MaxDirs];			// liste des répertoires de PATH (globale ???)
 
 int main(int argc, char * argv[]){
 	
 	char ligne[MaxLigne];			// la dernière ligne entrée par l'utilisateur
-	int tmp; 
+	int tmp, status, retour;
 
 	/* Découper UNE COPIE de PATH en repertoires */
 	decouper(strdup(getenv("PATH")), ":", path, MaxDirs);
 
 	/* Lire et traiter chaque ligne saisie dans le terminal */
 	for (printf(PROMPT); fgets(ligne, sizeof ligne, stdin) != 0; printf(PROMPT)){
-		
-		if (est_vide(ligne)){
-			fprintf(stderr, "Commande vide ! (0)\n");
-			continue;}		// ligne vide
 
-		/* lancement du processus fils qui va exécuter la pipeline */
-		if ((tmp = fork()) < 0){
-			perror("fork");
-			continue;}
+		if (!est_vide(ligne)){
+			int bg = arriere_plan(ligne);
 
-		/* parent : attendre la fin de l'enfant (ou pas) */
-		if (tmp != 0){
-			while(wait(0) != tmp);
-			/* Récupérer le statut de retour ? Faire waitpid(&status) ou un truc du genre ?*/
-			continue ;} // renvoyer le bon statut
+			/* lancement du processus fils qui va exécuter la pipeline */
+			if ((tmp = fork()) < 0){
+				perror("fork");
+				continue;}
 
-		/* enfant : prend en charge  la pipeline */
-		exec_pipeline(ligne);	// pour l'instant, une seule pipeline
+			/* enfant : prend en charge  la pipeline */
+			if (tmp == 0)
+				exec_pipeline(ligne);	// pour l'instant, une seule pipeline
+
+			/* parent : attendre la fin de l'enfant (ou pas) */
+			if (bg) printf("bg : %d\n", tmp);		// bg : on affiche le PID du fils
+			else {
+				if (waitpid(tmp, &status, 0) < 0)	// fg : on attend la fin du fils
+					perror("wait");}
+		}
+		/* Récupérer les éventuels processus lancés en arrière-plan qui sont terminés */
+		while ((retour = waitpid(-1, &status, WNOHANG)) > 0)
+			if (retour > 0 ) printf("[Processus %i terminé]\n", retour);
 	}
 	printf("Bye\n");
 	return 0;
@@ -120,7 +126,6 @@ int traite_pipe(char * commandes[]){
 	return i;
 	}
 
-
 /* exécute une commande, en cherchant l'exécutable dans la liste de répertoires fournie */
 int lance_cmd(char * commande){	
 	char * mot[MaxMot];				// liste des mots de la commande à exécuter
@@ -137,7 +142,6 @@ int lance_cmd(char * commande){
 	fprintf(stderr, "%s: not found\n", mot[0]);
 	exit(-1);
 }
-
 
 /* découpe une chaîne de caractères et renvoie le nombre de mots récupérés */
 int decouper(char * ligne, char * separ, char * mot[], int maxmot){	
@@ -162,4 +166,9 @@ int est_vide(char *str) {
         str++;
     }
     return 1;
+}
+
+int arriere_plan(char * ligne){
+	strtok(ligne, "&");
+	return(strtok(NULL, "") != NULL);
 }
