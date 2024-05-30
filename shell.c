@@ -1,10 +1,11 @@
 // *******************************************************
-// Version ..... : V3.0 du 30/05/2024
+// Version ..... : V4.0 du 30/05/2024
 // 
 // Fonctionnalités :
 // 		- les pipes
 //   	- les processus en arrière-plan
 // 		- les commandes internes
+//		- les redirections
 //
 // ********************************************************/
 
@@ -13,15 +14,23 @@
 #include <ctype.h>	// pour isspace()
 
 int decouper(char *, char *, char *[], int);
-int exec_pipeline(char *);
-int lance_cmd(char *);
-int traite_pipe(char * []);
 int est_vide(char *);
+
+int lance_cmd(char *);
+int exec_pipeline(char *);
+int traite_pipe(char * []);
+
 int arriere_plan(char *);
+
 int check_interne(char *);
 int cmd_internes(char * []);
 int moncd(char *[]);
 
+int redirige(char *, char *);
+int check_redir(char **);
+
+/* Convertit un caractère [0-9] en l'entier correspondant */
+int chiffre(char c) {return c - '0';}
 
 enum {
 	MaxLigne = 1024, 			// longueur max d'une ligne de commandes
@@ -31,7 +40,7 @@ enum {
 	MaxPipes = 128,				// nbre max de commandes séparées par " | " sur une ligne
 };
 
-# define PROMPT "V3.0 "
+# define PROMPT "V4.0 "
 char * path[MaxDirs];			// liste des répertoires de PATH (globale ???)
 
 int main(int argc, char * argv[]){
@@ -146,6 +155,8 @@ int lance_cmd(char * commande){
 
 	if (cmd_internes(mot) == 0) exit(0);
 
+	check_redir(mot);					// éventuelles redirections d'E/S
+
 	for (int i = 0; path[i] != 0; i ++){
 		snprintf(pathname, sizeof pathname, "%s/%s", path[i], mot[0]);
 		execv(pathname, mot);
@@ -213,7 +224,7 @@ int check_interne(char * commande){
 	if (strchr(commande, '|') != NULL)
 		return 1;
 	char * mot[MaxMot];				// liste des mots de la commande à exécuter
-	decouper(commande, " \t\n", mot, MaxMot);
+	decouper(strdup(commande), " \t\n", mot, MaxMot);
 	return cmd_internes(mot);
 }
 
@@ -228,3 +239,67 @@ int cmd_internes(char * commande[]){
 		exit(0);
 	return 1;
 }
+
+/* Réalise une redirection basique (<, >, >>, 2>, 2>>, 2>&1, 1>&2) */
+int redirige(char * op, char * fichier)
+{	int stream;		// descripteur du fichier du / vers lequel on redirige
+	int fd;			// flux standard concerné par la redirection (0, 1 ou 2)
+
+	mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;  // permissions pour la création de fichier, ici = 644
+
+	if (strcmp(op, "<") == 0) {				// mode lecture
+		stream = open(fichier, O_RDONLY);
+		fd = 0; }
+	else if (strcmp(op, ">") == 0) {		// mode écriture avec création si nécessaire
+		stream = open(fichier, O_WRONLY | O_CREAT | O_TRUNC, mode);
+		fd = 1; }
+	else if (strcmp(op, ">>") == 0){
+		stream = open(fichier, O_WRONLY | O_CREAT | O_APPEND, mode);
+		fd = 1; }
+	else if (strcmp(op, "2>") == 0){
+		stream = open(fichier, O_WRONLY | O_CREAT | O_TRUNC, mode);
+		fd = 2; }
+	else if (strcmp(op, "2>>") == 0){
+		stream = open(fichier, O_WRONLY | O_CREAT | O_APPEND, mode);
+		fd = 2; }
+	else if (op[1] == '>' && op[2] == '&'){		// opérateur de type 2>&1
+		fd = chiffre(op[0]);					// flux à rediriger (premier entier de l'opérateur)
+		stream = chiffre(op[3]);}				// flux vers lequel rediriger (second entier)
+	else {							// si rien de tout ça
+		fprintf(stderr, "Erreur : redirection \"%s\" non reconnue.\n", op);
+		return -1; }
+	
+	if (stream < 0) {				// erreur dans l'ouverture du fichier
+			perror("open");
+			return -1; }
+	
+	dup2(stream, fd);				// redirection
+	if (stream > 2) close(stream);	// fermeture du fichier (hors cas de fusion de flux standards type 2>&1)
+	return 0;
+}
+
+/* Parcourt un vecteur de mots pour en extraire les redirections */
+int check_redir(char * mots[]){
+	int i = 0;			// index pour recopier les mots non liés à la redirection
+	char op[5];			// opérateur (opérande ?)
+	
+	for(int k = 0; mots[k] ; k++)
+	{	
+		/* si c'est un opérateur de redirection (4 caractères max, parmi 1, 2, >, < et &) */
+		if (sscanf(mots[k], "%4[12><&]", op))
+		{	
+			/* opérateur à trois symboles max (redirection vers/depuis un fichier) */
+			if (strlen(mots[k]) < 4) {		
+				if (mots[k+1] == NULL) { 		// dernier mot de la ligne
+					fprintf(stderr, "Echec de redirection : manque le nom du fichier.\n");
+					continue;}			
+				redirige(mots[k], mots[k+1]);	// faire la redirection
+				k++;							// ignorer le mot suivant (nom du fichier)
+				}
+			/* opérateur type 2>&1 (redirections entre flux standards) */
+			else redirige(mots[k], NULL);		// faire la redirection
+		}	
+		else mots[i++] = mots[k];				// ne recopier que les autres mots
+	}
+	mots[i]=NULL;								// mettre à jour la fin du vecteur
+	return 0;	}
