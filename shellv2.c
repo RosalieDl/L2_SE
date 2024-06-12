@@ -1,15 +1,7 @@
-// *******************************************************
-// Version ..... : V5.1 du 01/06/2024
-// 
-// Fonctionnalités 
-// 		- les pipes
-//   	- les processus en arrière-plan
-// 		- les commandes internes
-//		- les redirections
-//		- l'auto-complétion avec readline()
-//
-//	+ mis des bool,
-// ********************************************************/
+// version 5.ish du 02 juin 
+// plein de problèmes
+// plein de fonctions moches
+// mais notamment: il faut revoir le pattern matching des redirections (là attrape tout m$eme juste "2")
 
 #include "sys.h"
 #include <string.h>
@@ -17,21 +9,16 @@
 #include <stdbool.h>
 #include <readline/readline.h>
 
-int decouper(char *, char *, char *[], int);
-int est_vide(char *);
-
-int lance_cmd(char *);
-int exec_pipeline(char *);
-int traite_pipe(char * []);
-
-bool arriere_plan(char *);
-
-bool est_interne(char *);
+int execute(char *);
+int lance_cmd(char *[], bool);
+int exec_pipeline(char *[]);
+bool premier_plan(char *);
 int cmd_internes(char * []);
 int moncd(char *[]);
-
 int redirige(char *, char *);
 int check_redir(char **);
+int decouper(char *, char *, char *[], int);
+int est_vide(char *);
 int chiffre(char);
 
 enum {
@@ -42,14 +29,12 @@ enum {
 	MaxPipes = 128,				// nbre max de commandes séparées par " | " sur une ligne
 };
 
-# define PROMPT "V5.0 "
+# define PROMPT "V5.3 "
 char * path[MaxDirs];			// liste des répertoires de PATH (globale ???)
 
 int main(int argc, char * argv[]){
-	
 	char * ligne = NULL;
-	int tmp, retour;
-	bool bg;
+	int retour;
 
 	/* Découper UNE COPIE de PATH en repertoires */
 	decouper(strdup(getenv("PATH")), ":", path, MaxDirs);
@@ -57,78 +42,92 @@ int main(int argc, char * argv[]){
 	/* Lire et traiter chaque ligne saisie dans le terminal */
 	for (; (ligne = readline(PROMPT));){
 
-		if (!est_vide(ligne)){
-			bg = arriere_plan(ligne);
+		if (!est_vide(ligne))
+			execute(ligne);
 
-			/* si premier plan, vérifier si c'est une commande interne avant de fork */
-			if (!bg && est_interne(ligne))
-					continue;
-
-			/* lancement du processus fils qui va exécuter la pipeline */
-			if ((tmp = fork()) < 0){
-				perror("fork");
-				continue;}
-
-			/* enfant : prend en charge  la pipeline */
-			if (tmp == 0)
-				exec_pipeline(ligne);	// pour l'instant, une seule pipeline
-
-			/* parent : attendre la fin de l'enfant (ou pas) */
-			if (bg) printf("bg : %d\n", tmp);		// bg : on affiche le PID du fils
-			else {
-				if (waitpid(tmp, 0, 0) < 0)	// fg : on attend la fin du fils
-					perror("wait");}
-		}
 		/* Récupérer les éventuels processus lancés en arrière-plan qui sont terminés */
 		while ((retour = waitpid(-1, 0, WNOHANG)) > 0)
 			if (retour > 0 ) printf("[Processus %i terminé]\n", retour);
-
+		
 		free(ligne);
 	}
-	printf("Bye\n");
+	printf("Bye :)\n");
+	return 0;
+}
+
+/* Exécution d'un ligne entière saisie par l'utilisateur */
+int execute(char * ligne){
+	char * liste_pipes[MaxPipes];	// la ou les (en cas de pipe(s)) commande(s) de la ligne
+	char * mot[MaxMot];				// liste des mots de la commande à exécuter
+	int tmp;
+
+	bool fg = premier_plan(ligne);
+			
+	/* si consiste en plusieurs commandes séparées par des pipes */ 
+	if (strchr(ligne, '|') != NULL){
+		decouper(ligne, "|", liste_pipes, MaxPipes);
+		tmp = exec_pipeline(liste_pipes);}	// pid du dernier processus de la pipeline
+	
+	/* commande unique */
+	else {
+		decouper(ligne, " \t\n", mot, MaxMot);
+		
+		/* commande interne --> exécution directement depuis le shell */ 
+		if (fg && (cmd_internes(mot) == 0))
+			return 0;
+
+		/* sinon, lancement du processus fils */
+		if ((tmp = fork()) < 0){
+			perror("fork");
+			return -1;}
+
+		/* enfant : exécute la commande*/
+		if (tmp == 0)
+			lance_cmd(mot, fg);
+	}
+
+	/* parent : attendre la fin de l'enfant (ou pas) */
+	if (!fg) printf("bg : %d\n", tmp);		// bg : on affiche le PID du fils
+	else {
+		if (waitpid(tmp, 0, 0) < 0){			// fg : on attend la fin du fils
+			perror("wait");
+			return -1; }
+	}
 	return 0;
 }
 
 /* Exécute une pipeline (une série de commandes séparées par des "|" ) */
-int exec_pipeline(char * pipeline){
-	char * liste_cmd[MaxPipes];		// la ou les (en cas de pipe(s)) commande(s) de la ligne
-	int i = 0;
+int exec_pipeline(char * pipeline[]){
+	int i, tmp;
+	char * mot[MaxMot];				
+	
+	/* lancement du sous-shell qui va gérer la pipeline */
+	if ((tmp = fork()) < 0){
+		perror("fork");
+		return -1;}	// !!! bonne réaction ?
 
-	/* Séparer les différentes commandes en cas de pipe */
-	decouper(pipeline, "|", liste_cmd, MaxPipes);
+	/* [parent] : rien à faire */
+	if (tmp > 0) return tmp;
 
-	/* plusieurs commandes successives */
-	if (liste_cmd[1] != 0) {
-		i = traite_pipe(liste_cmd);
-		if (i < 0) {
-			fprintf(stderr, "Echec de la commande [%d] : \"%s\".\n", -i, liste_cmd[-i]);
-			exit(-1); }
-	}
-
-	/* dernière (ou unique) commande de la pipeline */
-	lance_cmd(liste_cmd[i]);
-	return 0;
-}
-
-int traite_pipe(char * commandes[]){
+	/* [enfant] : prend en charge la pipeline */
 	int pipe_fd[2];				
-	int cmd, i;
+	int cmd;
 	int in = 0;
 
-	for (i = 0; commandes[i+1] != 0; i++) {	
-		if (est_vide(commandes[i])){
-			fprintf(stderr, "Erreur de syntaxe. ");		// fprintf ou pas nécessaire ?
-			return -i;}
+	for (i = 0; pipeline[i+1] != 0; i++) {	
+		if (est_vide(pipeline[i])){
+			fprintf(stderr, "Erreur de syntaxe.\n");		// fprintf ou pas nécessaire ?
+			exit(-i);}
 
 		/* ouvrir un pipe pour communiquer avec le processus suivant */	
 		if (pipe(pipe_fd) != 0) {
 			perror("pipe");
-			return -i;}
+			exit(-i);}
 
 		/* créer un enfant pour exécuter la "sous-commande" */
 		if ((cmd = fork()) < 0){
 			perror("fork");
-			return -i;}
+			exit(-i);}
 
 		if (cmd == 0){				// enfant
 			close(pipe_fd[0]); 		// ferme la sortie du tube (inutilisée)
@@ -136,36 +135,39 @@ int traite_pipe(char * commandes[]){
 			close(pipe_fd[1]);
 			dup2(in, 0);			// redirige la sortie utilisée précédemment sur son entrée
 			close(in);
-			lance_cmd(commandes[i]);	// exécute la commande
+			decouper(pipeline[i], " \t\n", mot, MaxMot);
+			lance_cmd(mot, false);	// exécute la commande
 		}
+
 		/* Parent */
 		close(pipe_fd[1]);			// fermeture de l'entrée du tube actuel
 		if (in != 0) close(in);		
 		in = pipe_fd[0];
 	}
+
 	dup2(in, 0);		// récupère en entrée la sortie du dernier pipe
 	close(in); 
-	return i;
+	// fprintf(stderr, "Echec de la commande [%d] : \"%s\".\n", -i, pipeline[-i]);
+
+	/* dernière commande de la pipeline */
+	decouper(pipeline[i], " \t\n", mot, MaxMot);
+	lance_cmd(mot, false);
+	return 0;
 }
 
 /* exécute une commande, en cherchant l'exécutable dans la liste de répertoires fournie */
-int lance_cmd(char * commande){	
-	char * mot[MaxMot];				// liste des mots de la commande à exécuter
+int lance_cmd(char * commande[], bool fg){	
 	char pathname[MaxPathLength];
 
-	if (decouper(commande, " \t\n", mot, MaxMot) == 0){
-		fprintf(stderr, "Erreur de syntaxe (manque la dernière commande)\n");
-		exit(-1);}
-
-	if (cmd_internes(mot) == 0) exit(0);
-
-	check_redir(mot);					// éventuelles redirections d'E/S
+	if (cmd_internes(commande) == 0) exit(0);	// c'est une commande interne et elle a été exécutée --> on sort
+	
+	check_redir(commande);						// mise en place des éventuelles redirections d'E/S
 
 	for (int i = 0; path[i] != 0; i ++){
-		snprintf(pathname, sizeof pathname, "%s/%s", path[i], mot[0]);
-		execv(pathname, mot);
+		snprintf(pathname, sizeof pathname, "%s/%s", path[i], commande[0]);
+		execv(pathname, commande);
 	}
-	fprintf(stderr, "%s: not found\n", mot[0]);
+	fprintf(stderr, "%s: not found\n", commande[0]);
 	exit(-1);
 }
 
@@ -189,47 +191,17 @@ int est_vide(char *str) {
     while (*str) {
         if (!isspace(*str))
             return 0;
-        str++;
-    }
+        str++; }
     return 1;
 }
 
-/* Renvoie true ssi la commande doit être exécutée en arrière plan */
-bool arriere_plan(char * ligne){
-	strtok(ligne, "&");
-	return(strtok(NULL, "") != NULL);
-}
-
-/* change de répertoire courant */
-int moncd(char * commande[]){
-	char * dir;
-	int len;
-
-	for (len = 0; commande[len] != 0; len ++);	// nombre de mots
-
-	if (len < 2){
-		dir = getenv("HOME");
-		if (dir == 0) dir = "/tmp";}
-	else if (len > 2){
-		fprintf(stderr, "usage: %s [dir]\n", commande[0]);
-		return 1;}
-	else 
-		dir = commande[1];
-	
-	if (chdir(dir) < 0){
-		perror(dir);
-		return 1;}
-	return 0;
-}
-
-/* Renvoie 0 si une commande interne a été trouvée et exécutée */
-bool est_interne(char * commande){
-	/* s'il y a des pipes, ne pas exécuter la commande depuis le shell (on va fork d'abord) */
-	if (strchr(commande, '|') != NULL)
-		return false;
-	char * mot[MaxMot];				// liste des mots de la commande à exécuter
-	decouper(strdup(commande), " \t\n", mot, MaxMot);
-	return (cmd_internes(mot)==0);
+// /* Renvoie true ssi la commande doit être exécutée au premier plan */
+bool premier_plan(char * ligne){
+	char *c = strchr(ligne, '&');
+	if (c == NULL || isalnum(*(c+1)))	// pas de "&", ou appartient pas en fin de mot (ex redirection "2>&1")
+		return true;
+	*c = '\0';							// éliminer le &
+	return false;
 }
 
 /* si l'entrée correspond à  une commande interne, l'exécuter et renvoyer 0, sinon 1 */
@@ -245,8 +217,8 @@ int cmd_internes(char * commande[]){
 }
 
 /* Réalise une redirection basique (<, >, >>, 2>, 2>>, 2>&1, 1>&2) */
-int redirige(char * op, char * fichier)
-{	int stream;		// descripteur du fichier du / vers lequel on redirige
+int redirige(char * op, char * fichier){	
+	int stream;		// descripteur du fichier du / vers lequel on redirige
 	int fd;			// flux standard concerné par la redirection (0, 1 ou 2)
 
 	mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;  // permissions pour la création de fichier, ici = 644
@@ -285,28 +257,48 @@ int redirige(char * op, char * fichier)
 /* Parcourt un vecteur de mots pour en extraire les redirections */
 int check_redir(char * mots[]){
 	int i = 0;			// index pour recopier les mots non liés à la redirection
-	char op[5];			// opérateur (opérande ?)
 	
-	for(int k = 0; mots[k] ; k++)
-	{	
-		/* si c'est un opérateur de redirection (4 caractères max, parmi 1, 2, >, < et &) */
-		if (sscanf(mots[k], "%4[12><&]", op))
-		{	
+	for(int k = 0; mots[k] ; k++) {	
+		/* si c'est un potentiel opérateur de redirection (contient les symboles < ou >) */
+		if (strchr(mots[k], '<') != NULL || strchr(mots[k], '>') != NULL) {	
+			
 			/* opérateur à trois symboles max (redirection vers/depuis un fichier) */
 			if (strlen(mots[k]) < 4) {		
 				if (mots[k+1] == NULL) { 		// dernier mot de la ligne
-					fprintf(stderr, "Echec de redirection : manque le nom du fichier.\n");
-					continue;}			
+					fprintf(stderr, "Echec de la redirection : manque le nom du fichier.\n");
+					continue; }			
 				redirige(mots[k], mots[k+1]);	// faire la redirection
-				k++;							// ignorer le mot suivant (nom du fichier)
-				}
+				k++; }							// ignorer le mot suivant (nom du fichier)
+
 			/* opérateur type 2>&1 (redirections entre flux standards) */
 			else redirige(mots[k], NULL);		// faire la redirection
-		}	
+		}
 		else mots[i++] = mots[k];				// ne recopier que les autres mots
 	}
 	mots[i]=NULL;								// mettre à jour la fin du vecteur
-	return 0;	}
+	return 0; }
 
 /* Convertit un caractère [0-9] en l'entier correspondant */
 int chiffre(char c) {return c - '0';}
+
+/* change de répertoire courant */
+int moncd(char * commande[]){
+	char * dir;
+	int len;
+
+	for (len = 0; commande[len] != 0; len ++);	// nombre de mots
+
+	if (len < 2){
+		dir = getenv("HOME");
+		if (dir == 0) dir = "/tmp";}
+	else if (len > 2){
+		fprintf(stderr, "usage: %s [dir]\n", commande[0]);
+		return 1;}
+	else 
+		dir = commande[1];
+	
+	if (chdir(dir) < 0){
+		perror(dir);
+		return 1;}
+	return 0;
+}
