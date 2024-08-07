@@ -1,30 +1,14 @@
 // *******************************************************
-// Nom ......... : mon-shell
-// Rôle ........ : Shell maison
+// Nom ......... : monshell
+// Rôle ........ : un shell maison
 // Auteur ...... : Rosalie Duteuil
 // Version ..... : V6.0 du 30/06/2024
 // Licence ..... : réalisé dans le cadre du cours de Systèmes d'Exploitaiton
-// Compilation . : gcc -Wall shellv2.c -o mon-shell -lreadline
-// Usage ....... : Pour exécuter : ./mon-shell
+// Compilation . : gcc -Wall -o monshell monshell.c -lreadline -I.
+// Usage ....... : Pour exécuter : ./monshell
 // ********************************************************/
 
-#include "sys.h"
-#include <string.h>
-#include <ctype.h>		// pour isspace() 
-#include <stdbool.h>
-#include <readline/readline.h>
-
-int execute(char *);
-int lance_cmd(char *[]);
-int exec_pipeline(char *[]);
-bool cmd_internes(char * []);
-int moncd(char *[]);
-int check_redir(char **);
-int redirige(char *, char *);
-int decouper(char *, char *, char *[], int);
-bool premier_plan(char *);
-bool est_vide(char *);
-int chiffre(char);
+#include "monshell.h"
 
 enum {
 	MaxLigne = 1024, 			// longueur max d'une ligne de commandes
@@ -40,6 +24,9 @@ char * path[MaxDirs];			// liste des répertoires de PATH
 int main(int argc, char * argv[]){
 	char * ligne = NULL;
 	int retour;
+
+	/* Ajouter le répertoire ./man au manpath */
+	setmanpath();
 
 	/* Découper UNE COPIE de PATH en repertoires */
 	decouper(strdup(getenv("PATH")), ":", path, MaxDirs);
@@ -62,7 +49,6 @@ int main(int argc, char * argv[]){
 
 /* Exécution d'un ligne entière saisie par l'utilisateur */
 int execute(char * ligne){
-	char * listePipes[MaxPipes];		// la ou les (en cas de pipe(s)) commande(s) de la ligne
 	char * mots[MaxMot];				// liste des mots de la commande à exécuter
 	int pid;
 
@@ -70,9 +56,7 @@ int execute(char * ligne){
 			
 	/* si consiste en plusieurs commandes séparées par des pipes */ 
 	if (strchr(ligne, '|') != NULL){
-		decouper(ligne, "|", listePipes, MaxPipes);
-		pid = exec_pipeline(listePipes); 	// pid du dernier processus de la pipeline
-		if (pid < 0) return -1; }
+		if ((pid = exec_pipeline(ligne)) < 0) return -1;} 	// pid du dernier process de la pipeline
 	
 	/* si la commande est unique */
 	else {
@@ -124,9 +108,12 @@ int lance_cmd(char * commande[]){
 /* **************************************************************** */
 
 /* Exécute une pipeline (une série de commandes séparées par des "|" ) */
-int exec_pipeline(char * pipeline[]){
+int exec_pipeline(char * ligne){
 	int i, pid;
-	char * mots[MaxMot];				
+	char * pipeline[MaxPipes];
+	char * mots[MaxMot];
+
+	decouper(ligne, "|", pipeline, MaxPipes);
 	
 	/* lancement du sous-shell qui va gérer la pipeline */
 	if ((pid = fork()) < 0){
@@ -169,8 +156,8 @@ int exec_pipeline(char * pipeline[]){
 
 		/* Parent */
 		close(pipe_fd[1]);			// fermeture de l'entrée du tube actuel
-		if (in != 0) close(in);		
-		in = pipe_fd[0];
+		if (in != 0) close(in);		// fermeture de la sortie du tube précédent
+		in = pipe_fd[0];			// conservation de la sortie du tube actuel
 	}
 
 	dup2(in, 0);		// récupère en entrée la sortie du dernier pipe
@@ -277,7 +264,7 @@ int redirige(char * op, char * fichier){
 	else if (strcmp(op, "2>>") == 0){		// écriture de stderr dans un fichier (concaténation)
 		stream = open(fichier, O_WRONLY | O_CREAT | O_APPEND, mode);
 		fd = 2; }
-	else if (op[1] == '>' && op[2] == '&'){	// opérateur de type 2>&1
+	else if (op[1] == '>' && op[2] == '&' && isdigit(op[0]) && isdigit(op[3])){	// opérateur de type 2>&1
 		fd = chiffre(op[0]);					// flux à rediriger (premier entier de l'opérateur)
 		stream = chiffre(op[3]);}				// flux vers lequel rediriger (second entier)
 	else {									// si rien de tout ça
@@ -315,7 +302,7 @@ int decouper(char * ligne, char * separ, char * mot[], int maxmot){
 /* Renvoie true ssi la commande doit être exécutée au premier plan */
 bool premier_plan(char * ligne){
 	char *c = strrchr(ligne, '&');		// trouve le dernier '&' contenu dans la ligne
-	if (c == NULL || isalnum(*(c+1)))	// pas de '&' dans la ligne, ou alors fait partie d'un mot (ex redirection "2>&1")
+	if (c == NULL || isgraph(*(c+1)))	// pas de '&' dans la ligne, ou alors fait partie d'un mot (ex redirection "2>&1")
 		return true;
 	*c = '\0';							// éliminer le '&'
 	return false;
@@ -332,3 +319,16 @@ bool est_vide(char *str) {
 
 /* Convertit un caractère [0-9] en l'entier correspondant */
 int chiffre(char c) {return c - '0';}
+
+/* Ajoute le sous-répertoire man/ au chemin de recherche des pages de manuel pour la commande man
+   NB : utilise PWD, donc nécessite que le programme soit lancé depuis le répertoire du programme */
+int setmanpath(){
+	char * dir = getenv("PWD");
+	char * path = malloc(strlen(dir) + 6);
+	if (path == NULL) return -1;
+	strcpy(path, dir);
+	strcat(path, "/man:");
+	setenv("MANPATH", path, 0); 
+	free(path);
+	return 0;
+}
